@@ -30,8 +30,11 @@ NOTICE_MAX_AGE = timedelta(hours=48)
 # a second check does not start while one that began under CHECK_LOCK seconds ago is running.
 CHECK_BUDGET = 150
 CHECK_LOCK = 290
-QUICK_RETRY_WAITS = (5, 10)  # a person is waiting for the reply, so give up sooner
-QUOTA_MEMORY = 2 * 3600  # seconds before a model that ran out of daily quota is tried again
+# When a person is waiting for a reply, Telegram's request is stopped after 60 seconds.
+# So the AI gets less patience, and a requested Canvas check starts no new item late on.
+QUICK_AI = {"retry_waits": (3, 6), "call_timeout": 12, "give_up_after": 40}
+QUICK_CHECK_BUDGET = 8
+QUOTA_MEMORY = 2 * 3600  # seconds before a model that ran out of quota or stalled is tried again
 
 
 def short_id(item_id):
@@ -59,15 +62,16 @@ class Assistant:
         self.events = self.calendar.events_since(self.now - timedelta(days=self.lookback_days + 1))
         token = setting("TELEGRAM_BOT_TOKEN")
         self.telegram = tg.Telegram(token) if token else None
+        self.last_check = {"new": 0, "waiting": 0, "outcomes": {}}
         self._extractor = None
-        self._retry_waits = None
+        self._quick = False  # True while answering a Telegram message
 
     def extractor(self):
         """Made on first use: answering /week or a button press needs no AI."""
         if self._extractor is None:
-            extra = {"retry_waits": self._retry_waits} if self._retry_waits else {}
+            extra = QUICK_AI if self._quick else {}
             models = [m.strip() for m in setting("GEMINI_MODELS", DEFAULT_MODELS).split(",") if m.strip()]
-            # Skip models recently found to be out of quota, so replies stay quick.
+            # Skip models recently found out of quota or not answering, so replies stay quick.
             rested = time.time() - QUOTA_MEMORY
             out = {m for m, since in self.state.get("ai_out", {}).items() if since > rested}
             self.state["ai_out"] = {m: self.state["ai_out"][m] for m in out}
@@ -119,20 +123,27 @@ class Assistant:
         update_id = update.get("update_id")
         if update_id in seen:
             print("telegram: repeated update skipped")
+            if self.state.get("tg_open") == update_id:
+                # It was started but never finished: the first try was cut off for taking too long.
+                self.state.pop("tg_open")
+                self.save()
+                self.tell("⚠️ That took too long and I had to stop. Please send it again.")
             return
         seen.append(update_id)
         del seen[:-REMEMBERED_UPDATES]
+        self.state["tg_open"] = update_id
         for old_key in ("tg_offset", "commands_set"):  # from when messages were polled hourly
             self.state.pop(old_key, None)
         self.save()
 
-        self._retry_waits = QUICK_RETRY_WAITS
+        self._quick = True
         try:
             if "callback_query" in update:
                 self.handle_button(update["callback_query"])
             else:
                 self.handle_message(update.get("message") or {}, update_id)
         finally:
+            self.state.pop("tg_open", None)
             self.save()
 
     def handle_message(self, message, update_id):
@@ -146,6 +157,8 @@ class Assistant:
             pass  # someone else found the bot: ignore them
         elif tg.wants_week(text):
             self.week_overview()
+        elif tg.wants_check(text):
+            self.check_on_request()
         elif text.startswith("/"):
             self.tell(tg.HELP)
         else:
@@ -255,7 +268,16 @@ class Assistant:
     def is_ahead(self, event):
         return tg.ends_after(event, self.now, self.tz)
 
-    def handle_canvas(self, started):
+    def check_on_request(self):
+        """Answer /check: read Canvas now instead of waiting for the next hourly check."""
+        outcome = self.check_canvas(budget=QUICK_CHECK_BUDGET)
+        if outcome == "busy":
+            self.tell("⏳ A check is already running. Its results will arrive in a moment.")
+        elif outcome == "ok":
+            self.tell(tg.check_text(self.last_check))
+        # "failed": the student was already told what went wrong with Canvas.
+
+    def handle_canvas(self, started, budget):
         client = CanvasClient(setting("CANVAS_BASE_URL"), setting("CANVAS_TOKEN"))
         recent = client.recent_items(self.lookback_days)
 
@@ -273,8 +295,10 @@ class Assistant:
 
         items = [item for item in recent if short_id(item.id) not in done]
         print(f"{len(items)} new Canvas item(s).")
+        # What /check reports back: how many posts were new, what became of them, how many wait.
+        self.last_check = {"new": len(items), "waiting": len(items), "outcomes": {}}
         for item in items:
-            if time.monotonic() - started > CHECK_BUDGET:
+            if time.monotonic() - started > budget:
                 print("Out of time: the rest waits for the next check.")
                 return
             try:
@@ -293,6 +317,8 @@ class Assistant:
                     f'Please read it yourself.\n<a href="{escape(item.url)}">Open in Canvas</a>'
                 )
             done.append(short_id(item.id))
+            self.last_check["waiting"] -= 1
+            self.last_check["outcomes"][outcome] = self.last_check["outcomes"].get(outcome, 0) + 1
             print(f"{item.id}: {outcome}")
             if worth_sending:
                 self.tell(text)
@@ -347,9 +373,10 @@ class Assistant:
             self.tell(text)
             print("digest sent")
 
-    def check_canvas(self):
-        """The hourly check. Returns "ok", "busy" (another check is running) or "failed"
-        (Canvas could not be read and the student could not be told)."""
+    def check_canvas(self, budget=CHECK_BUDGET):
+        """The Canvas check. Returns "ok", "busy" (another check is running) or "failed"
+        (Canvas could not be read and the student could not be told).
+        budget: seconds after which no further new item is started."""
         started = time.monotonic()
         stamp = int(time.time())
         free = lambda held: not held or stamp - held > CHECK_LOCK  # noqa: E731
@@ -359,7 +386,7 @@ class Assistant:
         told = True
         try:
             try:
-                self.handle_canvas(started)
+                self.handle_canvas(started, budget)
                 self.state.get("alerts", {}).pop("canvas", None)
             except CanvasProblem as problem:
                 print(problem)

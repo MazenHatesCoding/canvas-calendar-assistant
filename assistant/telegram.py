@@ -12,8 +12,11 @@ NOTE_LIMIT = 700  # Telegram rejects messages over 4096 characters
 DEADLINE_KINDS = ("assignment", "project")
 WEEK_REQUEST = re.compile(r"^\W*(week|wrap\s*-?\s*up|digest|next\s+(7|seven)\s+days|7\s+days)\W*$", re.I)
 
+CHECK_REQUEST = re.compile(r"^\W*(check|refresh)(\s+(canvas|now|canvas\s+now))?\W*$", re.I)
+
 COMMANDS = [
     {"command": "week", "description": "What is coming in the next 7 days"},
+    {"command": "check", "description": "Check Canvas for new posts right now"},
     {"command": "help", "description": "How to add or change things"},
 ]
 
@@ -24,7 +27,8 @@ HELP = (
     "<i>graph theory quiz next Monday in the tutorial, chapters 6 and 7</i>\n\n"
     "You can change or cancel something the same way:\n"
     "<i>the database quiz moved to Thursday at 2</i>\n\n"
-    "Send /week to see your next 7 days."
+    "Send /week to see your next 7 days.\n"
+    "I read Canvas every hour. Send /check to make me read it right now."
 )
 
 
@@ -78,6 +82,12 @@ def wants_week(text):
     """True when a message is asking for the 7-day overview, not describing something to add."""
     command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
     return command in ("/week", "/digest") or bool(WEEK_REQUEST.match(text))
+
+
+def wants_check(text):
+    """True when a message asks for a Canvas check right now."""
+    command = text.split()[0].split("@")[0].lower() if text.startswith("/") else ""
+    return command in ("/check", "/refresh") or bool(CHECK_REQUEST.match(text))
 
 
 # --- reading event times ---
@@ -165,6 +175,24 @@ def noted_text(event, decision, item, tz):
 def notice_text(decision, item):
     course = f"<b>{escape(item.course)}:</b> " if item.course else ""
     return f"ℹ️ {course}{_clip(decision.notes or decision.reason)}" + _link(item)
+
+
+def check_text(result):
+    """The answer to /check. Changes worth knowing were already sent as their own messages."""
+    new, waiting, outcomes = result["new"], result["waiting"], result["outcomes"]
+    if not new:
+        return "✅ Checked Canvas: nothing new."
+    posts = "1 new post" if new == 1 else f"{new} new posts"
+    names = (
+        ("created", "added"), ("updated", "changed"), ("cancelled", "cancelled"),
+        ("noted", "new details"), ("notified", "notice"), ("ignored", "nothing to do"),
+        ("unreadable", "could not read"),
+    )
+    parts = [f"{outcomes[key]} {label}" for key, label in names if outcomes.get(key)]
+    text = f"✅ Checked Canvas: {posts}" + (f" ({', '.join(parts)})." if parts else ".")
+    if waiting:
+        text += f"\n⏳ {waiting} still to go through. I'll finish on the next check, or send /check again."
+    return text
 
 
 def digest_text(events, now, tz, days=7):

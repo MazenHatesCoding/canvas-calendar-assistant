@@ -114,6 +114,18 @@ class TelegramWording(unittest.TestCase):
         for text in ("quiz next week", "wrap up the report by friday", "/help", "db quiz in 7 days"):
             self.assertFalse(tg.wants_week(text), text)
 
+    def test_check_requests(self):
+        for text in ("/check", "/check@MyBot", "check", "Check canvas", "refresh now!"):
+            self.assertTrue(tg.wants_check(text), text)
+        for text in ("check the quiz date", "/week", "check canvas for the db quiz"):
+            self.assertFalse(tg.wants_check(text), text)
+
+    def test_check_answer(self):
+        self.assertEqual(tg.check_text({"new": 0, "waiting": 0, "outcomes": {}}), "✅ Checked Canvas: nothing new.")
+        text = tg.check_text({"new": 3, "waiting": 1, "outcomes": {"created": 1, "ignored": 1}})
+        self.assertIn("3 new posts (1 added, 1 nothing to do).", text)
+        self.assertIn("1 still to go through", text)
+
 
 class SavedState(unittest.TestCase):
     """Two requests loaded the same state; each one's changes must survive the other's save."""

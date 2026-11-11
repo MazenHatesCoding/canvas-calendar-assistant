@@ -102,6 +102,8 @@ MANUAL_PREFACE = (
 )
 
 RETRY_WAITS = (20, 40, 60)  # seconds, for per-minute limits and a busy model
+CALL_TIMEOUT = 60  # seconds one request may take before the next model is tried
+MIN_TIMEOUT = 10  # Google rejects a request that allows less time than this
 
 
 def _day_list(posted_local):
@@ -111,12 +113,17 @@ def _day_list(posted_local):
 
 
 class Extractor:
-    def __init__(self, api_key, models, tz_name, timetable, retry_waits=RETRY_WAITS):
+    def __init__(self, api_key, models, tz_name, timetable,
+                 retry_waits=RETRY_WAITS, call_timeout=CALL_TIMEOUT, give_up_after=None):
         """models: best first. The free tier has a small daily quota per model, so when one
         runs out the next one takes over.
-        retry_waits: seconds to wait between tries when the service is busy."""
+        retry_waits: seconds to wait between tries when the service is busy.
+        call_timeout: seconds one request may take.
+        give_up_after: seconds a whole decision may take, waits included (None: no limit)."""
         self.retry_waits = tuple(retry_waits)
-        self.used_up = []  # models found to be out of daily quota during this run
+        self.call_timeout = call_timeout
+        self.give_up_after = give_up_after
+        self.used_up = []  # models found out of daily quota or not answering during this run
         self.client = genai.Client(api_key=api_key)
         self.models = [m.strip() for m in models if m.strip()]
         self.tz = ZoneInfo(tz_name)
@@ -145,28 +152,43 @@ class Extractor:
             raise Unreadable("the AI did not return a usable decision") from None
 
     def _ask(self, prompt):
-        config = types.GenerateContentConfig(
-            system_instruction=self.system,
-            response_mime_type="application/json",
-            response_schema=Decision,
-            temperature=0,
-        )
+        started = time.monotonic()
         waits = list(self.retry_waits)
         while True:
+            left = self.give_up_after - (time.monotonic() - started) if self.give_up_after else None
+            if left is not None and left < MIN_TIMEOUT:
+                raise AIUnavailable("AI service too slow")
+            timeout = min(self.call_timeout, left) if left is not None else self.call_timeout
+            config = types.GenerateContentConfig(
+                system_instruction=self.system,
+                response_mime_type="application/json",
+                response_schema=Decision,
+                temperature=0,
+                # The library's own silent retries are off: the waiting is done here, in the open.
+                http_options=types.HttpOptions(
+                    timeout=int(timeout * 1000), retry_options=types.HttpRetryOptions(attempts=1)
+                ),
+            )
             try:
                 return self.client.models.generate_content(
                     model=self.models[0], contents=prompt, config=config
                 ).text
             except errors.APIError as error:
-                daily_quota = error.code == 429 and "PerDay" in str(error)
-                if (daily_quota or error.code == 404) and len(self.models) > 1:
-                    # Used up for today, or the model no longer exists: move to the next one.
-                    print(f"   ({self.models[0]} unavailable, switching to {self.models[1]})")
-                    if daily_quota:
-                        self.used_up.append(self.models[0])
-                    self.models.pop(0)
-                    waits = list(self.retry_waits)
-                elif error.code in (429, 500, 503) and waits and not daily_quota:
-                    time.sleep(waits.pop(0))
-                else:
-                    raise AIUnavailable(f"AI service error {error.code}", quota=daily_quota) from None
+                code, daily_quota = error.code, error.code == 429 and "PerDay" in str(error)
+            except Exception as error:  # no answer in time, or no connection
+                print(f"   (no answer from {self.models[0]}: {type(error).__name__})")
+                code, daily_quota = None, False
+
+            stalled = code in (504, None)  # 504: Google gave up waiting for its own model
+            if (daily_quota or stalled or code == 404) and len(self.models) > 1:
+                # Used up for today, gone, or not answering: move to the next model.
+                print(f"   ({self.models[0]} unavailable, switching to {self.models[1]})")
+                if daily_quota or stalled:
+                    self.used_up.append(self.models[0])
+                self.models.pop(0)
+                waits = list(self.retry_waits)
+            elif code in (429, 500, 503, 504, None) and waits and not daily_quota and (left is None or waits[0] < left - MIN_TIMEOUT):
+                time.sleep(waits.pop(0))
+            else:
+                problem = f"AI service error {code}" if code else "AI service not answering"
+                raise AIUnavailable(problem, quota=daily_quota) from None
