@@ -1,4 +1,4 @@
-# Canvas Calendar Assistant
+# Canvas to Google Calendar Assistant
 
 Your instructors announce quizzes and deadlines in Canvas posts, and you find out the night
 before. This assistant reads those posts for you, works out the dates, puts them in your
@@ -94,7 +94,7 @@ section B for labs".
 
 1. Press this button:
 
-   [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FMazenHatesCoding%2Fcanvas-calendar-assistant&project-name=canvas-calendar-assistant&repository-name=canvas-calendar-assistant&env=CANVAS_BASE_URL,CANVAS_TOKEN,GEMINI_API_KEY,TELEGRAM_BOT_TOKEN,GOOGLE_TOKEN_JSON,CRON_SECRET,TIMETABLE&envDescription=The%20seven%20values%20from%20steps%201%20to%205%20of%20the%20setup%20guide.&envLink=https%3A%2F%2Fgithub.com%2FMazenHatesCoding%2Fcanvas-calendar-assistant%23set-up-your-own-copy)
+   [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FMazenHatesCoding%2Fcanvas-to-google-calendar-assistant&project-name=canvas-to-google-calendar-assistant&repository-name=canvas-to-google-calendar-assistant&env=CANVAS_BASE_URL,CANVAS_TOKEN,GEMINI_API_KEY,TELEGRAM_BOT_TOKEN,GOOGLE_TOKEN_JSON,CRON_SECRET,TIMETABLE&envDescription=The%20seven%20values%20from%20steps%201%20to%205%20of%20the%20setup%20guide.&envLink=https%3A%2F%2Fgithub.com%2FMazenHatesCoding%2Fcanvas-to-google-calendar-assistant%23set-up-your-own-copy)
 
 2. Vercel asks to create a repository in your GitHub account. Keep **private** selected
    and continue.
@@ -102,7 +102,7 @@ section B for labs".
    minute for it to finish. If the TIMETABLE box only takes one line, write your
    timetable as one long line. It works the same.
 4. Vercel shows your copy's address, something like
-   `https://canvas-calendar-assistant-abc123.vercel.app`. Save it.
+   `https://canvas-to-google-calendar-assistant-abc123.vercel.app`. Save it.
 
 ### 7. Test and connect
 
