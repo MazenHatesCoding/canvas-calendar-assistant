@@ -1,0 +1,11 @@
+I am in group 2. My classes run Sunday to Wednesday. Thursday is a day off for me.
+
+My weekly sessions:
+- Sunday 09:20-12:10: Calculus 2 (MA102) Lecture, Dr. Example, room A-101
+- Sunday 14:00-15:40: Calculus 2 (MA102) Tutorial, Eng. Example, room A-204
+- Monday 11:20-13:00: Physics 1 (PH101) Lab, Eng. Example, room Lab 3
+- Tuesday 09:20-12:10: Physics 1 (PH101) Lecture, Dr. Example, room A-101
+
+Write this in your own words. What matters is your group or section, and for every
+session: the day, the start and end time, the course, the type (lecture, tutorial, lab)
+and the room. Add anything else that helps, for example "I am in section B for labs".

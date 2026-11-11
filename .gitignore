@@ -1,0 +1,14 @@
+# Private: keys, sign-ins and your personal timetable
+.env
+.env*.local
+token.json
+credentials.json
+client_secret*.json
+timetable.txt
+
+# Generated
+.venv/
+__pycache__/
+*.pyc
+.vercel
+.vscode/
