@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect Google Calendar · Canvas Calendar Assistant</title>
+  <meta name="robots" content="noindex">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="site">
+    <a class="name" href="/">Canvas Calendar Assistant</a>
+    <nav>
+      <a href="privacy.html">Privacy policy</a>
+      <a href="terms.html">Terms</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Connect your Google Calendar</h1>
+    <p class="lead">This is one step of setting up your own copy. It gives the assistant a calendar of its own in your Google account, and gives you two values to paste into Vercel.</p>
+
+    <h2>1. Sign in with Google</h2>
+    <p>The button opens Google in a new tab. Three things will look odd there. All three are expected:</p>
+    <ol>
+      <li><strong>"Google hasn't verified this app."</strong> This is a student project, not a company. Choose <em>Advanced</em>, then <em>Go to Canvas Calendar Assistant</em>.</li>
+      <li><strong>A permission box.</strong> Leave it ticked. It lets the assistant manage only the calendar it creates, never your other calendars.</li>
+      <li><strong>An error page at the end</strong>, saying the site can't be reached. That is the finish line. Copy the whole address from the top of that page, it starts with <code>http://localhost</code>.</li>
+    </ol>
+    <div class="row">
+      <button id="signin" type="button">Sign in with Google</button>
+    </div>
+
+    <h2>2. Paste the address you copied</h2>
+    <label for="address">The address of the error page</label>
+    <input id="address" type="text" autocomplete="off" spellcheck="false" placeholder="http://localhost:8765/?state=...&code=...">
+    <div class="row">
+      <button id="finish" type="button">Finish connecting</button>
+      <span id="working" class="small" hidden>Working, this takes a few seconds…</span>
+    </div>
+    <p id="problem" class="problem" role="alert" hidden></p>
+
+    <section id="result" hidden>
+      <h2>3. Your two values</h2>
+      <p>A calendar named "University" now exists in your Google Calendar. Keep this page open and paste these into Vercel when the setup guide asks for them. Treat both like passwords.</p>
+
+      <label for="token">GOOGLE_TOKEN_JSON</label>
+      <textarea id="token" readonly></textarea>
+      <div class="row"><button class="quiet" type="button" data-copy="token">Copy</button></div>
+
+      <label for="secret">CRON_SECRET</label>
+      <input id="secret" type="text" readonly>
+      <div class="row"><button class="quiet" type="button" data-copy="secret">Copy</button></div>
+      <p class="note">CRON_SECRET is a random password made in your browser just now. It keeps strangers from starting your copy's Canvas check, and you will need it once more on your own setup page.</p>
+    </section>
+
+    <footer class="small">
+      This page passes your sign-in to Google and hands the result straight back to you. Nothing is kept. Details are in the <a href="privacy.html">privacy policy</a>.
+    </footer>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function random(bytes) {
+      const values = crypto.getRandomValues(new Uint8Array(bytes));
+      return Array.from(values, (v) => v.toString(16).padStart(2, "0")).join("");
+    }
+
+    function remember(key, value) { try { sessionStorage.setItem(key, value); } catch (e) {} }
+    function recall(key) { try { return sessionStorage.getItem(key); } catch (e) { return null; } }
+
+    function fail(message) {
+      $("problem").textContent = message;
+      $("problem").hidden = false;
+    }
+
+    $("signin").addEventListener("click", () => {
+      const state = random(16);
+      remember("state", state);
+      window.open("/api/google?state=" + state, "_blank", "noopener");
+    });
+
+    $("finish").addEventListener("click", async () => {
+      $("problem").hidden = true;
+      let code, state;
+      try {
+        const address = new URL($("address").value.trim());
+        code = address.searchParams.get("code");
+        state = address.searchParams.get("state");
+        if (address.searchParams.get("error")) {
+          return fail("Google says the sign-in was cancelled. Press the sign-in button and try again.");
+        }
+      } catch (e) {
+        return fail("That is not a full address. Copy everything in the address bar of the error page.");
+      }
+      if (!code) return fail("That address has no sign-in code in it. Copy the address of the error page that appears after you allow access.");
+      if (recall("state") && state !== recall("state")) {
+        return fail("That address comes from an older sign-in. Press the sign-in button and use the new one.");
+      }
+
+      $("finish").disabled = true;
+      $("working").hidden = false;
+      try {
+        const answer = await fetch("/api/google", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+        });
+        const data = await answer.json().catch(() => ({}));
+        if (!answer.ok) return fail(data.error || "Something went wrong. Please try again.");
+        $("token").value = data.GOOGLE_TOKEN_JSON;
+        $("secret").value = random(24);
+        $("result").hidden = false;
+        $("address").value = "";
+        $("result").scrollIntoView({ behavior: "smooth" });
+      } catch (e) {
+        fail("Could not reach the server. Check your connection and try again.");
+      } finally {
+        $("finish").disabled = false;
+        $("working").hidden = true;
+      }
+    });
+
+    document.querySelectorAll("[data-copy]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const field = $(button.dataset.copy);
+        try {
+          await navigator.clipboard.writeText(field.value);
+        } catch (e) {
+          field.select();
+          document.execCommand("copy");
+        }
+        button.textContent = "Copied";
+        setTimeout(() => { button.textContent = "Copy"; }, 1500);
+      });
+    });
+  </script>
+</body>
+</html>

@@ -8,7 +8,8 @@ from zoneinfo import ZoneInfo
 from assistant import telegram as tg
 from assistant.canvas import html_to_text, parse_time
 from assistant.gcal import describe, merge_changes, summary_for, when_fields
-from assistant.web import has_secret
+from assistant import config
+from assistant.web import same_secret
 
 TZ = ZoneInfo("Africa/Cairo")
 
@@ -155,22 +156,45 @@ class SavedState(unittest.TestCase):
 
 
 class WebSecrets(unittest.TestCase):
-    def setUp(self):
-        os.environ["TEST_SECRET"] = "s3cret-value"
-        self.addCleanup(os.environ.pop, "TEST_SECRET", None)
-
     def test_matching_secret(self):
-        self.assertTrue(has_secret("s3cret-value", "TEST_SECRET"))
-        self.assertTrue(has_secret("Bearer s3cret-value", "TEST_SECRET", prefix="Bearer "))
+        self.assertTrue(same_secret("s3cret-value", "s3cret-value"))
 
     def test_wrong_or_missing_secret(self):
-        for given in (None, "", "nope", "Bearer s3cret-value"):
-            self.assertFalse(has_secret(given, "TEST_SECRET"), given)
+        for given in (None, "", "nope", "s3cret-value "):
+            self.assertFalse(same_secret(given, "s3cret-value"), given)
 
     def test_unset_secret_never_matches(self):
-        os.environ["TEST_SECRET"] = ""
-        self.assertFalse(has_secret("", "TEST_SECRET"))
-        self.assertFalse(has_secret("Bearer ", "TEST_SECRET", prefix="Bearer "))
+        self.assertFalse(same_secret("", ""))
+        self.assertFalse(same_secret(None, ""))
+
+    def test_webhook_secret_comes_from_the_bot_token(self):
+        self.addCleanup(os.environ.pop, "TELEGRAM_BOT_TOKEN", None)
+        os.environ["TELEGRAM_BOT_TOKEN"] = ""
+        self.assertEqual(config.webhook_secret(), "")
+        os.environ["TELEGRAM_BOT_TOKEN"] = "123:abc"
+        first = config.webhook_secret()
+        self.assertRegex(first, r"^[0-9a-f]{64}$")  # only characters Telegram accepts
+        self.assertNotIn("123:abc", first)
+        os.environ["TELEGRAM_BOT_TOKEN"] = "123:abd"
+        self.assertNotEqual(config.webhook_secret(), first)
+
+
+class GoogleConnection(unittest.TestCase):
+    def setUp(self):
+        for name in ("GOOGLE_TOKEN_JSON", "GOOGLE_CALENDAR_ID"):
+            self.addCleanup(os.environ.__setitem__, name, os.environ.get(name, ""))
+        os.environ["GOOGLE_CALENDAR_ID"] = ""
+
+    def test_calendar_id_can_live_inside_the_sign_in(self):
+        os.environ["GOOGLE_TOKEN_JSON"] = '{"refresh_token": "r", "calendar_id": "abc@group"}'
+        self.assertEqual(config.calendar_id(), "abc@group")
+        os.environ["GOOGLE_CALENDAR_ID"] = "other@group"
+        self.assertEqual(config.calendar_id(), "other@group")
+
+    def test_broken_value_counts_as_missing(self):
+        os.environ["GOOGLE_TOKEN_JSON"] = "not json"
+        self.assertEqual(config.google_connection(), {})
+        self.assertIn("GOOGLE_TOKEN_JSON", config.missing())
 
 
 if __name__ == "__main__":

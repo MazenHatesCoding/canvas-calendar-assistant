@@ -8,6 +8,14 @@
     "api/telegram.py": {
       "maxDuration": 60,
       "excludeFiles": "{tests/**,public/**,.github/**,.venv/**}"
+    },
+    "api/setup.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{tests/**,public/**,.github/**,.venv/**}"
+    },
+    "api/google.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{tests/**,public/**,.github/**,.venv/**}"
     }
   },
   "schedules": {

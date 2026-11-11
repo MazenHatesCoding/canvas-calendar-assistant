@@ -7,6 +7,7 @@
 Unless `verbose` is set, nothing printed here contains course content.
 """
 
+import hashlib
 import time
 from datetime import date, datetime, timedelta, timezone
 from html import escape
@@ -19,7 +20,6 @@ from .extractor import AIUnavailable, Extractor, Unreadable
 from .gcal import Calendar, describe, private
 
 DEFAULT_MODELS = "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite"
-REQUIRED = ("CANVAS_BASE_URL", "CANVAS_TOKEN", "GEMINI_API_KEY", "GOOGLE_CALENDAR_ID")
 REMEMBERED_IDS = 400  # keeps the saved state well inside what one event description holds
 REMEMBERED_UPDATES = 30
 TOKEN_LIFETIME_DAYS = 30
@@ -43,10 +43,6 @@ def short_id(item_id):
     return kind[:1] + number
 
 
-def missing_settings():
-    return [name for name in REQUIRED if not setting(name)]
-
-
 class Assistant:
     def __init__(self, verbose=False):
         self.verbose = verbose
@@ -56,7 +52,7 @@ class Assistant:
         self.today = self.now.date().isoformat()
         self.lookback_days = int(setting("LOOKBACK_DAYS", "21"))
 
-        self.calendar = Calendar(setting("GOOGLE_CALENDAR_ID"), self.tz_name)
+        self.calendar = Calendar(config.calendar_id(), self.tz_name)
         self.state = self.calendar.load_state()
         # Events the AI may update: everything from the lookback window onwards.
         self.events = self.calendar.events_since(self.now - timedelta(days=self.lookback_days + 1))
@@ -213,8 +209,8 @@ class Assistant:
             self.state.setdefault("token", {})["done"] = True
             self.tell(
                 "✅ Marked as done. I won't remind you about this token again.\n\n"
-                "When you save the new token, also set CANVAS_TOKEN_CREATED to the day you "
-                "created it, so the next reminder comes on time."
+                "Save the new token as CANVAS_TOKEN in your Vercel project (Settings → "
+                "Environment Variables), then redeploy so it takes effect."
             )
         elif query.get("data") == "token_snooze":
             self.tell("💤 OK. I'll remind you again tomorrow.")
@@ -327,6 +323,12 @@ class Assistant:
 
     def token_reminder(self):
         created = setting("CANVAS_TOKEN_CREATED")
+        if not created:
+            # No date given: count from the day this token was first used here.
+            mark = hashlib.sha256(setting("CANVAS_TOKEN").encode()).hexdigest()[:10]
+            if self.state.get("token_seen", {}).get("mark") != mark:
+                self.state["token_seen"] = {"mark": mark, "day": self.today}
+            created = self.state["token_seen"]["day"]
         try:
             created_day = date.fromisoformat(created)
         except ValueError:

@@ -7,13 +7,13 @@ are answered by api/telegram.py. Add --verbose to print titles and the AI's reas
 import sys
 
 from . import config
-from .core import Assistant, missing_settings
+from .core import Assistant
 
 
 def main():
     sys.stdout.reconfigure(encoding="utf-8")  # Windows consoles choke on Arabic otherwise
     config.load()
-    missing = missing_settings()
+    missing = config.missing()
     if missing:
         sys.exit("Missing settings: " + ", ".join(missing))
     if Assistant("--verbose" in sys.argv).check_canvas() == "failed":

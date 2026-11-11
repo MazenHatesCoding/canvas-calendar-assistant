@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Finish setup · Canvas Calendar Assistant</title>
+  <meta name="robots" content="noindex">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="site">
+    <a class="name" href="/">Canvas Calendar Assistant</a>
+    <nav>
+      <a href="privacy.html">Privacy policy</a>
+      <a href="terms.html">Terms</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Finish setting up your copy</h1>
+    <p class="lead">This tests each value you saved in Vercel and connects your Telegram bot to this copy. You can run it as often as you like.</p>
+
+    <label for="secret">Your CRON_SECRET</label>
+    <input id="secret" type="password" autocomplete="off" spellcheck="false">
+    <div class="row">
+      <button id="run" type="button">Test and connect</button>
+      <span id="working" class="small" hidden>Testing, this takes up to half a minute…</span>
+    </div>
+    <p id="problem" class="problem" role="alert" hidden></p>
+
+    <section id="result" hidden>
+      <h2>Results</h2>
+      <ul id="checks" class="checks"></ul>
+      <p id="verdict"></p>
+    </section>
+
+    <footer class="small">
+      Changed a value in Vercel? Redeploy first (Deployments → the three dots → Redeploy), then test again. Values only take effect after a redeploy.
+    </footer>
+  </main>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    function fail(message) {
+      $("problem").textContent = message;
+      $("problem").hidden = false;
+    }
+
+    $("run").addEventListener("click", async () => {
+      $("problem").hidden = true;
+      $("result").hidden = true;
+      const secret = $("secret").value.trim();
+      if (!secret) return fail("Paste your CRON_SECRET first. It is the value you saved in Vercel under that name.");
+
+      $("run").disabled = true;
+      $("working").hidden = false;
+      try {
+        const answer = await fetch("/api/setup", { method: "POST", headers: { Authorization: "Bearer " + secret } });
+        const data = await answer.json().catch(() => ({}));
+        if (!answer.ok) return fail(data.error || "Something went wrong (" + answer.status + "). Please try again.");
+
+        $("checks").replaceChildren(...data.checks.map((check) => {
+          const item = document.createElement("li");
+          const name = document.createElement("strong");
+          name.textContent = (check.ok ? "✅ " : "❌ ") + check.name;
+          const detail = document.createElement("span");
+          detail.className = "detail";
+          detail.textContent = check.detail;
+          item.append(name, detail);
+          return item;
+        }));
+        $("verdict").textContent = data.ready
+          ? "Everything works. Open your bot in Telegram and press Start: the first person to message it becomes its owner. Then send /check."
+          : "Fix the lines marked ❌ in Vercel (Settings → Environment Variables), redeploy, and test again.";
+        $("result").hidden = false;
+      } catch (e) {
+        fail("Could not reach the server. Check your connection and try again.");
+      } finally {
+        $("run").disabled = false;
+        $("working").hidden = true;
+      }
+    });
+  </script>
+</body>
+</html>

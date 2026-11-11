@@ -26,8 +26,8 @@ def main():
     TOKEN_FILE.write_text(credentials.to_json(), encoding="utf-8")
     print("Signed in. Saved token.json.")
 
-    if setting("GOOGLE_CALENDAR_ID"):
-        print("GOOGLE_CALENDAR_ID is already set, keeping the existing calendar.")
+    if config.calendar_id():
+        print("A calendar is already set, keeping it.")
         return
     calendar_id = create_calendar(credentials, CALENDAR_NAME, setting("TIMEZONE", "Africa/Cairo"))
     set_key(str(ENV_FILE), "GOOGLE_CALENDAR_ID", calendar_id, quote_mode="never")

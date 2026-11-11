@@ -12,7 +12,7 @@ from urllib.parse import quote
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.credentials import Credentials
 
-from .config import TOKEN_FILE, setting
+from .config import google_connection
 
 API = "https://www.googleapis.com/calendar/v3"
 SCOPES = ["https://www.googleapis.com/auth/calendar.app.created"]
@@ -23,13 +23,10 @@ SAVE_ATTEMPTS = 4
 
 
 def load_credentials():
-    """From the GOOGLE_TOKEN_JSON setting (used when hosted) or the local token.json file."""
-    raw = setting("GOOGLE_TOKEN_JSON")
-    if not raw and TOKEN_FILE.exists():
-        raw = TOKEN_FILE.read_text(encoding="utf-8")
-    if not raw:
-        raise SystemExit("Google is not connected yet. Run: python -m assistant.connect_google")
-    return Credentials.from_authorized_user_info(json.loads(raw), SCOPES)
+    saved = google_connection()
+    if not saved:
+        raise SystemExit("Google is not connected yet. See the README for how to sign in.")
+    return Credentials.from_authorized_user_info(saved, SCOPES)
 
 
 def _moment(text):

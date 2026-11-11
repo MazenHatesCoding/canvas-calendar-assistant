@@ -52,6 +52,10 @@ class Telegram:
             "setWebhook", url=url, secret_token=secret, allowed_updates=["message", "callback_query"]
         )
 
+    def me(self):
+        """The bot's own account. Fails if the token is wrong."""
+        return self._call("getMe")
+
     def webhook_info(self):
         return self._call("getWebhookInfo")
 

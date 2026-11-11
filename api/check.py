@@ -10,15 +10,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from assistant.core import Assistant, missing_settings  # noqa: E402
-from assistant.web import has_secret, reply  # noqa: E402
+from assistant import config  # noqa: E402
+from assistant.core import Assistant  # noqa: E402
+from assistant.web import bearer, reply, same_secret  # noqa: E402
 
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if not has_secret(self.headers.get("Authorization"), "CRON_SECRET", prefix="Bearer "):
+        if not same_secret(bearer(self), config.setting("CRON_SECRET")):
             return reply(self, 401, "Unauthorized")
-        missing = missing_settings()
+        missing = config.missing()
         if missing:
             print("Missing settings: " + ", ".join(missing))
             return reply(self, 500, "Missing settings")
