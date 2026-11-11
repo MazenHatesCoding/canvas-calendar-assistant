@@ -12,3 +12,6 @@ __pycache__/
 *.pyc
 .vercel
 .vscode/
+
+# Handover notes between sessions
+context.md
