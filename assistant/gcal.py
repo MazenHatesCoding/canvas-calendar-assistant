@@ -4,6 +4,7 @@ Access is limited to calendars this app created (the "calendar.app.created" perm
 so the assistant cannot see or change any of the user's other calendars.
 """
 
+import copy
 import json
 from datetime import datetime, timedelta
 from urllib.parse import quote
@@ -18,10 +19,11 @@ SCOPES = ["https://www.googleapis.com/auth/calendar.app.created"]
 STATE_FLAG = "assistantState"  # marks the one event that holds the saved state
 REMINDER_MINUTES = (24 * 60, 2 * 60)  # one day before and two hours before
 DESCRIPTION_LIMIT = 8000  # Google's own limit is a little above this
+SAVE_ATTEMPTS = 4
 
 
 def load_credentials():
-    """From the GOOGLE_TOKEN_JSON setting (used on GitHub) or the local token.json file."""
+    """From the GOOGLE_TOKEN_JSON setting (used when hosted) or the local token.json file."""
     raw = setting("GOOGLE_TOKEN_JSON")
     if not raw and TOKEN_FILE.exists():
         raw = TOKEN_FILE.read_text(encoding="utf-8")
@@ -84,6 +86,25 @@ def when_fields(start_text, end_text, all_day, fallback_day, tz_name):
     )
 
 
+def merge_changes(base, mine, theirs):
+    """`theirs` with the changes made between `base` and `mine` applied on top.
+
+    Used when two requests loaded the same saved state: each one's changes survive, and
+    where both changed the same value, `mine` wins. Dictionaries are merged key by key.
+    """
+    result = copy.deepcopy(theirs)
+    for key in set(base) | set(mine):
+        if key not in mine:
+            result.pop(key, None)  # I removed it
+        elif key not in base or mine[key] != base[key]:
+            old, other = base.get(key), result.get(key)
+            if isinstance(mine[key], dict) and isinstance(other, dict):
+                result[key] = merge_changes(old if isinstance(old, dict) else {}, mine[key], other)
+            else:
+                result[key] = copy.deepcopy(mine[key])
+    return result
+
+
 def summary_for(title, low_confidence, dated=True):
     if not dated:
         return "[date unknown] " + title
@@ -96,6 +117,7 @@ class Calendar:
         self.path = f"/calendars/{quote(calendar_id, safe='')}"
         self.tz_name = tz_name
         self._state_event_id = None
+        self._loaded_state = {}
 
     def _call(self, method, path, **kwargs):
         response = self.session.request(method, API + path, timeout=30, **kwargs)
@@ -107,26 +129,80 @@ class Calendar:
     # Kept in the description of one hidden-away event on 1 January 2000, so no database is
     # needed. (A calendar's own description only holds 1024 characters, which is too little.)
 
-    def load_state(self):
+    #
+    # Two requests can be at work at once (a Telegram message arriving during the hourly
+    # check). So saving never overwrites blindly: it re-reads the stored state, applies only
+    # what this request changed, and writes only if nobody else wrote in between.
+
+    def _read_state(self):
+        """The stored state and the event's version tag, or ({}, None) if there is none yet."""
         found = self._call(
             "GET",
             f"{self.path}/events",
             params={"privateExtendedProperty": f"{STATE_FLAG}=1", "maxResults": 1},
         ).get("items", [])
         if not found:
-            return {}
+            return {}, None
         self._state_event_id = found[0]["id"]
         try:
             state = json.loads(found[0].get("description") or "")
         except json.JSONDecodeError:
-            return {}
-        return state if isinstance(state, dict) else {}
+            state = {}
+        return (state if isinstance(state, dict) else {}), found[0].get("etag")
+
+    def load_state(self):
+        state, _ = self._read_state()
+        self._loaded_state = copy.deepcopy(state)
+        return state
 
     def save_state(self, state):
+        """Store `state`, keeping changes another request saved since it was loaded.
+        `state` is updated in place to what was actually stored."""
+        for _ in range(SAVE_ATTEMPTS):
+            stored, etag = self._read_state()
+            merged = merge_changes(self._loaded_state, state, stored)
+            if self._write_state(merged, etag):
+                break
+        else:
+            raise RuntimeError("Google Calendar: the saved state kept changing, could not save")
+        self._adopt(state, merged)
+
+    def claim(self, state, key, value, is_free):
+        """Set state[key] = value and save, but only if `is_free(stored value)` holds at the
+        moment of writing. Returns False if another request holds it. This is what stops two
+        hourly checks from running at the same time."""
+        for _ in range(SAVE_ATTEMPTS):
+            stored, etag = self._read_state()
+            if not is_free(stored.get(key)):
+                return False
+            merged = merge_changes(self._loaded_state, state, stored)
+            merged[key] = value
+            if self._write_state(merged, etag):
+                self._adopt(state, merged)
+                return True
+        return False
+
+    def _adopt(self, state, merged):
+        self._loaded_state = copy.deepcopy(merged)
+        state.clear()
+        state.update(merged)
+
+    def _write_state(self, state, etag):
+        """False if someone else changed the stored state first."""
         text = json.dumps(state, separators=(",", ":"))
         if self._state_event_id:
-            self._call("PATCH", f"{self.path}/events/{self._state_event_id}", json={"description": text})
-            return
+            response = self.session.request(
+                "PATCH",
+                f"{API}{self.path}/events/{self._state_event_id}",
+                json={"description": text},
+                headers={"If-Match": etag} if etag else {},
+                timeout=30,
+            )
+            if response.status_code == 412:
+                return False
+            if not response.ok:
+                raise RuntimeError(f"Google Calendar PATCH failed: {response.status_code} {response.text[:300]}")
+            return True
         created = self._call(
             "POST",
             f"{self.path}/events",
@@ -141,6 +217,7 @@ class Calendar:
             },
         )
         self._state_event_id = created["id"]
+        return True
 
     # --- events ---
 

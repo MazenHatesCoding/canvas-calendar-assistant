@@ -111,9 +111,12 @@ def _day_list(posted_local):
 
 
 class Extractor:
-    def __init__(self, api_key, models, tz_name, timetable):
+    def __init__(self, api_key, models, tz_name, timetable, retry_waits=RETRY_WAITS):
         """models: best first. The free tier has a small daily quota per model, so when one
-        runs out the next one takes over."""
+        runs out the next one takes over.
+        retry_waits: seconds to wait between tries when the service is busy."""
+        self.retry_waits = tuple(retry_waits)
+        self.used_up = []  # models found to be out of daily quota during this run
         self.client = genai.Client(api_key=api_key)
         self.models = [m.strip() for m in models if m.strip()]
         self.tz = ZoneInfo(tz_name)
@@ -148,7 +151,7 @@ class Extractor:
             response_schema=Decision,
             temperature=0,
         )
-        waits = list(RETRY_WAITS)
+        waits = list(self.retry_waits)
         while True:
             try:
                 return self.client.models.generate_content(
@@ -159,8 +162,10 @@ class Extractor:
                 if (daily_quota or error.code == 404) and len(self.models) > 1:
                     # Used up for today, or the model no longer exists: move to the next one.
                     print(f"   ({self.models[0]} unavailable, switching to {self.models[1]})")
+                    if daily_quota:
+                        self.used_up.append(self.models[0])
                     self.models.pop(0)
-                    waits = list(RETRY_WAITS)
+                    waits = list(self.retry_waits)
                 elif error.code in (429, 500, 503) and waits and not daily_quota:
                     time.sleep(waits.pop(0))
                 else:

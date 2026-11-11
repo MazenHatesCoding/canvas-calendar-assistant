@@ -1,4 +1,4 @@
-"""Telegram: sending messages, reading what the student sent, and the message wording."""
+"""Telegram: sending messages, the webhook setup, and the message wording."""
 
 import re
 from datetime import datetime, timedelta
@@ -24,8 +24,7 @@ HELP = (
     "<i>graph theory quiz next Monday in the tutorial, chapters 6 and 7</i>\n\n"
     "You can change or cancel something the same way:\n"
     "<i>the database quiz moved to Thursday at 2</i>\n\n"
-    "Send /week to see your next 7 days.\n\n"
-    "I check for messages about once an hour, so my replies are not instant."
+    "Send /week to see your next 7 days."
 )
 
 
@@ -43,10 +42,14 @@ class Telegram:
             raise RuntimeError(f"Telegram {method} failed: {data.get('description')}")
         return data["result"]
 
-    def updates(self, offset):
-        return self._call(
-            "getUpdates", offset=offset, timeout=0, allowed_updates=["message", "callback_query"]
+    def set_webhook(self, url, secret):
+        """Have Telegram deliver messages and button presses to `url`, signed with `secret`."""
+        self._call(
+            "setWebhook", url=url, secret_token=secret, allowed_updates=["message", "callback_query"]
         )
+
+    def webhook_info(self):
+        return self._call("getWebhookInfo")
 
     def send(self, chat_id, text, buttons=None):
         payload = {

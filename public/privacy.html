@@ -38,12 +38,12 @@
       <li><strong>Google Gemini API:</strong> the text of each new announcement or message, together with your timetable, is sent to Google's Gemini API using your own API key, to work out dates and details. Google's terms for that API apply to this text.</li>
       <li><strong>Google Calendar:</strong> the resulting events are saved in your Google account.</li>
       <li><strong>Telegram:</strong> short notifications about those events are sent to you through your own Telegram bot.</li>
-      <li><strong>GitHub:</strong> if you run the tool on GitHub Actions, it runs in your own GitHub account and your keys are kept in that account's encrypted secrets.</li>
+      <li><strong>Vercel:</strong> if you host the tool on Vercel, it runs in your own Vercel account and your keys are kept in that account's environment variables. Your Canvas posts and Telegram messages pass through your copy there while it works; it does not store them.</li>
     </ul>
     <p>Nothing is sent anywhere else.</p>
 
     <h2>Storage and deletion</h2>
-    <p>The tool keeps no database of its own. Your events live in your Google Calendar, and your keys live on your computer or in your GitHub account. To remove everything, delete the calendar the tool created, revoke its access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>, delete your Canvas access token, and delete your copy of the tool.</p>
+    <p>The tool keeps no database of its own. Your events live in your Google Calendar, and your keys live on your computer or in your Vercel account. To remove everything, delete the calendar the tool created, revoke its access at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>, delete your Canvas access token, and delete your copy of the tool.</p>
 
     <h2>Changes</h2>
     <p>If this policy changes, the new version will be posted on this page with a new date.</p>

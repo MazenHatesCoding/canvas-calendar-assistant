@@ -1,4 +1,4 @@
-"""Settings. They come from environment variables: a local .env file, or GitHub Secrets."""
+"""Settings. They come from environment variables: a local .env file, or the host's settings."""
 
 import os
 from pathlib import Path
@@ -17,7 +17,7 @@ def load():
 
 
 def setting(name, default=""):
-    # An empty value counts as "not set": GitHub passes unset secrets as empty strings.
+    # An empty value counts as "not set".
     return os.getenv(name, "").strip() or default
 
 

@@ -1,0 +1,17 @@
+# Never uploaded to Vercel: private files (the hosted copy gets these as settings instead)
+.env
+.env*
+token.json
+credentials.json
+client_secret*.json
+timetable.txt
+context.md
+
+# Not needed to run
+.venv/
+.vscode/
+.github/
+__pycache__/
+*.pyc
+tests/
+README.md

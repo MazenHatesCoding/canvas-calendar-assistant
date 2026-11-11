@@ -1,12 +1,14 @@
 """Checks for the parts that need no network. Run:  python -m unittest discover tests"""
 
+import os
 import unittest
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from assistant import telegram as tg
 from assistant.canvas import html_to_text, parse_time
-from assistant.gcal import describe, summary_for, when_fields
+from assistant.gcal import describe, merge_changes, summary_for, when_fields
+from assistant.web import has_secret
 
 TZ = ZoneInfo("Africa/Cairo")
 
@@ -111,6 +113,52 @@ class TelegramWording(unittest.TestCase):
             self.assertTrue(tg.wants_week(text), text)
         for text in ("quiz next week", "wrap up the report by friday", "/help", "db quiz in 7 days"):
             self.assertFalse(tg.wants_week(text), text)
+
+
+class SavedState(unittest.TestCase):
+    """Two requests loaded the same state; each one's changes must survive the other's save."""
+
+    BASE = {"done": ["a1"], "token": {"created": "2026-11-11"}, "checking": 5}
+
+    def test_both_sides_keep_their_changes(self):
+        mine = {"done": ["a1", "a2"], "token": {"created": "2026-11-11", "sent": "2026-12-06"}}
+        theirs = {**self.BASE, "token": {"created": "2026-11-11", "done": True}, "tg_seen": [7]}
+        self.assertEqual(
+            merge_changes(self.BASE, mine, theirs),
+            {
+                "done": ["a1", "a2"],
+                "token": {"created": "2026-11-11", "sent": "2026-12-06", "done": True},
+                "tg_seen": [7],
+            },
+        )
+
+    def test_untouched_values_come_from_the_stored_copy(self):
+        theirs = {**self.BASE, "done": ["a1", "a9"]}
+        self.assertEqual(merge_changes(self.BASE, dict(self.BASE), theirs), theirs)
+
+    def test_inputs_are_not_modified(self):
+        mine, theirs = {"token": {"sent": "x"}}, {"token": {"done": True}}
+        merge_changes({}, mine, theirs)
+        self.assertEqual((mine, theirs), ({"token": {"sent": "x"}}, {"token": {"done": True}}))
+
+
+class WebSecrets(unittest.TestCase):
+    def setUp(self):
+        os.environ["TEST_SECRET"] = "s3cret-value"
+        self.addCleanup(os.environ.pop, "TEST_SECRET", None)
+
+    def test_matching_secret(self):
+        self.assertTrue(has_secret("s3cret-value", "TEST_SECRET"))
+        self.assertTrue(has_secret("Bearer s3cret-value", "TEST_SECRET", prefix="Bearer "))
+
+    def test_wrong_or_missing_secret(self):
+        for given in (None, "", "nope", "Bearer s3cret-value"):
+            self.assertFalse(has_secret(given, "TEST_SECRET"), given)
+
+    def test_unset_secret_never_matches(self):
+        os.environ["TEST_SECRET"] = ""
+        self.assertFalse(has_secret("", "TEST_SECRET"))
+        self.assertFalse(has_secret("Bearer ", "TEST_SECRET", prefix="Bearer "))
 
 
 if __name__ == "__main__":
