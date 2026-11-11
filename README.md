@@ -137,8 +137,9 @@ two hours before.
   about are marked `[?]`, and every event links back to the post it came from.
 - **The free AI allowance is small:** about 20 requests a day per Gemini model, and one
   request per new post or typed message. Normal use stays far below it. When one model
-  runs out the assistant moves to the next, and posts it could not process wait for a
-  later check. Nothing is lost.
+  runs out or stops answering the assistant moves to another, and posts it could not
+  process wait for a later check. A message you typed is saved the same way: the bot says
+  so, handles it within the hour and tells you the result. Nothing is lost.
 - **The hourly check can start up to 15 minutes late.** That is how Vercel's free plan
   works.
 - **Canvas tokens expire.** The bot reminds you a few days before. Create a new token as

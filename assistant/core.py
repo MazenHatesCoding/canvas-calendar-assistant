@@ -8,6 +8,7 @@ Unless `verbose` is set, nothing printed here contains course content.
 """
 
 import hashlib
+import json
 import time
 from datetime import date, datetime, timedelta, timezone
 from html import escape
@@ -32,9 +33,13 @@ CHECK_BUDGET = 150
 CHECK_LOCK = 290
 # When a person is waiting for a reply, Telegram's request is stopped after 60 seconds.
 # So the AI gets less patience, and a requested Canvas check starts no new item late on.
-QUICK_AI = {"retry_waits": (3, 6), "call_timeout": 12, "give_up_after": 40}
+# "reserve" seconds are kept for the last (fastest) model in case the ones before it hang.
+QUICK_AI = {"retry_waits": (3, 6), "call_timeout": 12, "give_up_after": 40, "reserve": 15}
 QUICK_CHECK_BUDGET = 8
-QUOTA_MEMORY = 2 * 3600  # seconds before a model that ran out of quota or stalled is tried again
+AI_MEMORY = 6 * 3600  # seconds before a model that ran out of quota or stalled is tried again
+# A typed note the AI could not handle at once waits in the saved state for the next check.
+# The state shares one event description (8,192 characters) with everything else kept there.
+NOTES_ROOM = 2000  # characters all waiting notes together may take, as stored
 
 
 def short_id(item_id):
@@ -67,10 +72,13 @@ class Assistant:
         if self._extractor is None:
             extra = QUICK_AI if self._quick else {}
             models = [m.strip() for m in setting("GEMINI_MODELS", DEFAULT_MODELS).split(",") if m.strip()]
-            # Skip models recently found out of quota or not answering, so replies stay quick.
-            rested = time.time() - QUOTA_MEMORY
-            out = {m for m, since in self.state.get("ai_out", {}).items() if since > rested}
-            self.state["ai_out"] = {m: self.state["ai_out"][m] for m in out}
+            # Skip models recently found out of quota or not answering. "ai_out": no use to
+            # anyone for now. "ai_slow": too slow for someone who is waiting, though the hourly
+            # check, which has more patience, still tries them.
+            rested = time.time() - AI_MEMORY
+            for key in ("ai_out", "ai_slow"):
+                self.state[key] = {m: t for m, t in self.state.get(key, {}).items() if t > rested}
+            out = set(self.state["ai_out"]) | (set(self.state["ai_slow"]) if self._quick else set())
             self._extractor = Extractor(
                 setting("GEMINI_API_KEY"),
                 [m for m in models if m not in out] or models[-1:],
@@ -166,21 +174,31 @@ class Assistant:
         self.tell("✅ Linked. I'll send your notifications here.\n\n" + tg.HELP)
         print("telegram: chat linked")
 
-    def add_by_hand(self, update_id, message):
-        item = Item(
-            id=f"manual-{update_id}",
+    @staticmethod
+    def note_item(note_id, text, sent):
+        return Item(
+            id=f"manual-{note_id}",
             kind="note typed by the student",
             course="",
             title="",
-            body=message["text"],
-            posted_at=datetime.fromtimestamp(message["date"], timezone.utc),
+            body=text,
+            posted_at=datetime.fromtimestamp(sent, timezone.utc),
             url="",
         )
+
+    def add_by_hand(self, update_id, message):
+        item = self.note_item(update_id, message["text"], message["date"])
         try:
             outcome, text, _ = self.apply(item, manual=True)
         except AIUnavailable as error:
             print(f"{item.id}: {error}")
-            self.tell("⚠️ The AI service is unavailable right now. Please send that again later.")
+            if self.keep_note(update_id, message):
+                self.tell(
+                    "⏳ The AI service is busy right now. I saved your note and will handle it "
+                    "within the hour, then tell you here. No need to send it again."
+                )
+            else:
+                self.tell("⚠️ The AI service is unavailable right now. Please send that again later.")
             return
         except Unreadable:
             self.tell("⚠️ I couldn't make sense of that. Could you put it another way?")
@@ -191,6 +209,46 @@ class Assistant:
             return
         print(f"{item.id}: {outcome}")
         self.tell(text if outcome != "ignored" else f"I didn't add anything. {text}")
+
+    def keep_note(self, update_id, message):
+        """Put a typed note aside for the next check. False if there is no room left for it."""
+        notes = dict(self.state.get("notes", {}))
+        notes[str(update_id)] = {"text": message["text"], "date": message["date"]}
+        if len(json.dumps(notes)) > NOTES_ROOM:
+            return False
+        self.state["notes"] = notes
+        return True
+
+    def handle_notes(self, started, budget):
+        """Typed notes that were put aside because the AI could not answer in time."""
+        notes = self.state.get("notes", {})
+        have_event = {private(event).get("source") for event in self.events}
+        for note_id in sorted(notes, key=lambda n: notes[n]["date"]):
+            if time.monotonic() - started > budget:
+                return
+            note = notes[note_id]
+            item = self.note_item(note_id, note["text"], note["date"])
+            if item.id in have_event:  # written by a check that was cut off before it could save
+                del notes[note_id]
+                continue
+            try:
+                outcome, text, _ = self.apply(item, manual=True)
+            except AIUnavailable as error:
+                print(f"{item.id}: still waiting ({error})")
+                if not error.quota:
+                    self.alert("ai", f"{error}. Check GEMINI_API_KEY. I will keep retrying.")
+                return
+            except Unreadable:
+                outcome, text = "unreadable", "⚠️ I couldn't make sense of it. Could you put it another way?"
+            except RuntimeError as error:  # Google Calendar refused the change: try again next time
+                print(f"{item.id}: {error}")
+                return
+            del notes[note_id]
+            print(f"{item.id}: {outcome}")
+            shown = note["text"] if len(note["text"]) <= 80 else note["text"][:77] + "..."
+            if outcome == "ignored":
+                text = f"I didn't add anything. {text}"
+            self.tell(f"📝 Your saved note “{escape(shown)}”:\n\n{text}")
 
     def handle_button(self, query):
         message = query.get("message") or {}
@@ -225,8 +283,14 @@ class Assistant:
         try:
             decision = extractor.decide(item, known, manual)
         finally:
-            for model in extractor.used_up:
-                self.state["ai_out"].setdefault(model, int(time.time()))
+            now = int(time.time())
+            for model in extractor.out_of_quota:
+                self.state["ai_out"].setdefault(model, now)
+            for model in extractor.stalled:
+                self.state["ai_slow" if self._quick else "ai_out"].setdefault(model, now)
+            for model in extractor.answered:  # working (again): stop skipping it
+                self.state["ai_out"].pop(model, None)
+                self.state["ai_slow"].pop(model, None)
         if self.verbose:
             print(f"   {item.course} | {item.title} | {decision.action} | {decision.title} | "
                   f"{decision.start} | {decision.reason}")
@@ -387,6 +451,7 @@ class Assistant:
             return "busy"
         told = True
         try:
+            self.handle_notes(started, budget)
             try:
                 self.handle_canvas(started, budget)
                 self.state.get("alerts", {}).pop("canvas", None)
