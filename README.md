@@ -162,6 +162,7 @@ two hours before.
 | The bot does not answer | Open `/setup.html` on your copy and run the test again. |
 | "Canvas rejected the access token" | The token expired. Create a new one and replace **CANVAS_TOKEN**. |
 | "The AI service is unavailable" | The free allowance is used up or Google is busy. Send it again later. |
+| "Google no longer accepts my saved sign-in" | Do step 4 again, replace **GOOGLE_TOKEN_JSON** with the new value, and redeploy. |
 | An event has the wrong date | Tell the bot, for example "the database quiz is on Thursday at 2, not Wednesday". |
 | You want to stop | Delete the project on Vercel, delete the "University" calendar, and remove the app at [myaccount.google.com/permissions](https://myaccount.google.com/permissions). |
 

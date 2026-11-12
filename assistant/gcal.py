@@ -9,6 +9,8 @@ import json
 from datetime import datetime, timedelta
 from urllib.parse import quote
 
+import requests
+from google.auth.exceptions import GoogleAuthError, RefreshError
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2.credentials import Credentials
 
@@ -19,7 +21,32 @@ SCOPES = ["https://www.googleapis.com/auth/calendar.app.created"]
 STATE_FLAG = "assistantState"  # marks the one event that holds the saved state
 REMINDER_MINUTES = (24 * 60, 2 * 60)  # one day before and two hours before
 DESCRIPTION_LIMIT = 8000  # Google's own limit is a little above this
+# Google cuts a description off at 8,192 characters and still answers "saved" (measured on
+# 12 Nov 2026). A saved state cut short cannot be read back, so one that long is never sent.
+STATE_LIMIT = 8192
+GET_TIMEOUT = 15  # seconds; reading is tried twice
 SAVE_ATTEMPTS = 4
+
+
+class CalendarProblem(RuntimeError):
+    """Google Calendar did not do what was asked.
+
+    refused: Google read the request and rejected it, so sending it again will not help.
+    signed_out: the saved Google sign-in no longer works; the student has to sign in again.
+    """
+
+    def __init__(self, message, refused=False, signed_out=False):
+        super().__init__(message)
+        self.refused, self.signed_out = refused, signed_out
+
+
+def _problem(method, response):
+    status = response.status_code
+    return CalendarProblem(
+        f"Google Calendar {method} failed: {status} {response.text[:300]}",
+        refused=status in (400, 413),
+        signed_out=status == 401,
+    )
 
 
 def load_credentials():
@@ -83,11 +110,17 @@ def when_fields(start_text, end_text, all_day, fallback_day, tz_name):
     )
 
 
+def _plain(values):
+    return all(isinstance(value, (str, int)) for value in values)
+
+
 def merge_changes(base, mine, theirs):
     """`theirs` with the changes made between `base` and `mine` applied on top.
 
     Used when two requests loaded the same saved state: each one's changes survive, and
     where both changed the same value, `mine` wins. Dictionaries are merged key by key.
+    Lists of plain values (finished posts, handled messages) are merged entry by entry:
+    what I added is added, what I removed is removed.
     """
     result = copy.deepcopy(theirs)
     for key in set(base) | set(mine):
@@ -97,6 +130,12 @@ def merge_changes(base, mine, theirs):
             old, other = base.get(key), result.get(key)
             if isinstance(mine[key], dict) and isinstance(other, dict):
                 result[key] = merge_changes(old if isinstance(old, dict) else {}, mine[key], other)
+            elif (isinstance(mine[key], list) and isinstance(other, list)
+                  and isinstance(old or [], list) and _plain(mine[key] + other + (old or []))):
+                old = old or []
+                removed = set(old) - set(mine[key])
+                kept = [value for value in other if value not in removed]
+                result[key] = kept + [v for v in mine[key] if v not in old and v not in kept]
             else:
                 result[key] = copy.deepcopy(mine[key])
     return result
@@ -116,10 +155,27 @@ class Calendar:
         self._state_event_id = None
         self._loaded_state = {}
 
+    def _send(self, method, path, **kwargs):
+        """One request. Every way it can go wrong surfaces as a RuntimeError, so callers
+        have a single thing to catch: no connection, a timeout, or a refused sign-in."""
+        # Reading changes nothing, so a read that got no answer is simply tried once more.
+        for attempt in (1, 2) if method == "GET" else (2,):
+            try:
+                return self.session.request(
+                    method, API + path, timeout=GET_TIMEOUT if method == "GET" else 30, **kwargs
+                )
+            except (requests.RequestException, GoogleAuthError) as error:
+                if attempt == 1 and isinstance(error, (requests.ConnectionError, requests.Timeout)):
+                    continue
+                raise CalendarProblem(
+                    f"Google Calendar {method} failed: {type(error).__name__}",
+                    signed_out=isinstance(error, RefreshError),
+                ) from None
+
     def _call(self, method, path, **kwargs):
-        response = self.session.request(method, API + path, timeout=30, **kwargs)
+        response = self._send(method, path, **kwargs)
         if not response.ok:
-            raise RuntimeError(f"Google Calendar {method} failed: {response.status_code} {response.text[:300]}")
+            raise _problem(method, response)
         return response.json() if response.content else None
 
     # --- saved state ---
@@ -144,6 +200,7 @@ class Calendar:
         try:
             state = json.loads(found[0].get("description") or "")
         except json.JSONDecodeError:
+            print("The saved state could not be read: starting again from nothing.")
             state = {}
         return (state if isinstance(state, dict) else {}), found[0].get("etag")
 
@@ -187,18 +244,19 @@ class Calendar:
     def _write_state(self, state, etag):
         """False if someone else changed the stored state first."""
         text = json.dumps(state, separators=(",", ":"))
+        if len(text) > STATE_LIMIT:
+            raise CalendarProblem("Google Calendar: the saved state is too large to store")
         if self._state_event_id:
-            response = self.session.request(
+            response = self._send(
                 "PATCH",
-                f"{API}{self.path}/events/{self._state_event_id}",
+                f"{self.path}/events/{self._state_event_id}",
                 json={"description": text},
                 headers={"If-Match": etag} if etag else {},
-                timeout=30,
             )
             if response.status_code == 412:
                 return False
             if not response.ok:
-                raise RuntimeError(f"Google Calendar PATCH failed: {response.status_code} {response.text[:300]}")
+                raise _problem("PATCH", response)
             return True
         created = self._call(
             "POST",

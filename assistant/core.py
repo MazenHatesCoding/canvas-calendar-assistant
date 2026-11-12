@@ -18,18 +18,24 @@ from . import config, telegram as tg
 from .canvas import CanvasClient, CanvasProblem, Item
 from .config import setting
 from .extractor import AIUnavailable, Extractor, Unreadable
-from .gcal import Calendar, describe, private
+from .gcal import Calendar, CalendarProblem, describe, private
 
 DEFAULT_MODELS = "gemini-3.8-flash,gemini-3.7-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite"
-REMEMBERED_IDS = 400  # keeps the saved state well inside what one event description holds
+# The saved state shares one event description: 8,192 characters, and Google silently cuts
+# off anything longer. These limits keep it inside that with room to spare; `save` checks.
+REMEMBERED_IDS = 350
+STATE_ROOM = 7900
 REMEMBERED_UPDATES = 30
 TOKEN_LIFETIME_DAYS = 30
 TOKEN_REMIND_AFTER_DAYS = 25
 QUIET_BEFORE_HOUR = 8  # the token reminder waits until this hour, local time
 NOTICE_MAX_AGE = timedelta(hours=48)
-# The host stops a check after 300 seconds. New items are not started after CHECK_BUDGET, and
-# a second check does not start while one that began under CHECK_LOCK seconds ago is running.
-CHECK_BUDGET = 150
+# The host stops a check after 300 seconds, without warning and before anything is saved.
+# So new items are not started after CHECK_BUDGET, and one AI decision may take at most
+# CHECK_AI["give_up_after"] seconds: together they must stay under the host's limit.
+# A second check does not start while one that began under CHECK_LOCK seconds ago is running.
+CHECK_BUDGET = 100
+CHECK_AI = {"call_timeout": 30, "give_up_after": 150, "reserve": 30}
 CHECK_LOCK = 290
 # When a person is waiting for a reply, Telegram's request is stopped after 60 seconds.
 # So the AI gets less patience, and a requested Canvas check starts no new item late on.
@@ -40,22 +46,32 @@ AI_MEMORY = 6 * 3600  # seconds before a model that ran out of quota or stalled 
 # A typed note the AI could not handle at once waits in the saved state for the next check.
 # The state shares one event description (8,192 characters) with everything else kept there.
 NOTES_ROOM = 2000  # characters all waiting notes together may take, as stored
+# Checks in which Google Calendar may reject the same post or note before the assistant
+# stops trying and hands it to the student instead.
+SAVE_TRIES = 3
+SOMETHING_WRONG = "⚠️ Something went wrong on my side and I could not finish that. Please send it again in a minute."
+NOT_FOUND = "I couldn't find that in your calendar, so nothing was changed. Send /week to see what is there."
 
 
 def short_id(item_id):
-    """ "announcement-11733" -> "a11733": the form in which finished items are remembered."""
+    """ "announcement-11733" -> "a11733": the form in which finished items are remembered.
+    Some Canvas sites use very long numbers. Those are shortened to a fingerprint, so that
+    a few hundred of them still fit in the saved state."""
     kind, _, number = item_id.partition("-")
+    if len(number) > 8:
+        number = "~" + hashlib.sha256(number.encode()).hexdigest()[:7]
     return kind[:1] + number
 
 
 class Assistant:
     def __init__(self, verbose=False):
         self.verbose = verbose
-        self.tz_name = setting("TIMEZONE", "Africa/Cairo")
+        self.tz_name = config.timezone_name()
         self.tz = ZoneInfo(self.tz_name)
         self.now = datetime.now(self.tz)
         self.today = self.now.date().isoformat()
-        self.lookback_days = int(setting("LOOKBACK_DAYS", "21"))
+        self.lookback_days = config.whole_number("LOOKBACK_DAYS", 21, 1, 120)
+        self.canvas_problem = None  # what went wrong reading Canvas in this check, if anything
 
         self.calendar = Calendar(config.calendar_id(), self.tz_name)
         self.state = self.calendar.load_state()
@@ -70,7 +86,7 @@ class Assistant:
     def extractor(self):
         """Made on first use: answering /week or a button press needs no AI."""
         if self._extractor is None:
-            extra = QUICK_AI if self._quick else {}
+            extra = QUICK_AI if self._quick else CHECK_AI
             models = [m.strip() for m in setting("GEMINI_MODELS", DEFAULT_MODELS).split(",") if m.strip()]
             # Skip models recently found out of quota or not answering. "ai_out": no use to
             # anyone for now. "ai_slow": too slow for someone who is waiting, though the hourly
@@ -89,6 +105,13 @@ class Assistant:
         return self._extractor
 
     def save(self):
+        # Last resort, not expected to happen: a state too long to store would be cut off by
+        # Google and lost entirely. Forgetting the oldest finished posts instead only means
+        # they are looked at again.
+        done = self.state.get("done")
+        while done and len(json.dumps(self.state, separators=(",", ":"))) > STATE_ROOM:
+            print("The saved state is nearly full: forgetting the oldest finished posts.")
+            del done[: max(1, len(done) // 5)]
         self.calendar.save_state(self.state)
 
     # --- talking to the student ---
@@ -96,7 +119,7 @@ class Assistant:
     @property
     def chat_id(self):
         fixed = setting("TELEGRAM_CHAT_ID")
-        return int(fixed) if fixed else self.state.get("chat_id")
+        return int(fixed) if fixed.lstrip("-").isdigit() else self.state.get("chat_id")
 
     def tell(self, text, buttons=None):
         """Send a Telegram message. Returns False if it could not be sent."""
@@ -114,6 +137,40 @@ class Assistant:
         alerts = self.state.setdefault("alerts", {})
         if alerts.get(key) != self.today and self.tell(f"⚠️ {escape(text)}"):
             alerts[key] = self.today
+
+    def ai_alert(self, error):
+        if error.quota:
+            text = ("Today's free AI allowance is used up. New posts wait until it resets, "
+                    "usually within a day. Nothing is lost.")
+        elif error.code in (400, 401, 403):
+            text = f"The AI service rejected my request ({error}). Check GEMINI_API_KEY."
+        elif error.code == 429:
+            text = ("The free AI service is at its limit for the moment. The posts still waiting "
+                    "are handled on the next check.")
+        else:
+            text = f"The AI service is not answering ({error}). New posts wait, and I retry every hour."
+        self.alert("ai", text)
+
+    def failed_again(self, key):
+        """Count one more check in which `key` could not be saved. True when it is time to give up."""
+        tries = self.state.setdefault("tries", {})
+        tries[key] = tries.get(key, 0) + 1
+        if tries[key] < SAVE_TRIES:
+            return False
+        del tries[key]
+        return True
+
+    def calendar_trouble(self, error, key):
+        """Google Calendar would not save something during a check. Returns True if the
+        assistant should stop trying it: Google rejected it, several checks in a row."""
+        if error.refused and self.failed_again(key):
+            return True
+        if error.signed_out:
+            self.alert("calendar", "Google no longer accepts the saved sign-in. Sign in again "
+                                   "on the connect page and replace GOOGLE_TOKEN_JSON.")
+        else:
+            self.alert("calendar", "Google Calendar did not accept a change. I will try again on the next check.")
+        return False
 
     # --- what the student sent ---
 
@@ -146,6 +203,12 @@ class Assistant:
                 self.handle_button(update["callback_query"])
             else:
                 self.handle_message(update.get("message") or {}, update_id)
+        except Exception:
+            # Whatever went wrong, the student is not left looking at silence.
+            source = update.get("message") or (update.get("callback_query") or {}).get("message") or {}
+            if self.chat_id and (source.get("chat") or {}).get("id") == self.chat_id:
+                self.tell(SOMETHING_WRONG)
+            raise
         finally:
             self.state.pop("tg_open", None)
             self.save()
@@ -153,7 +216,12 @@ class Assistant:
     def handle_message(self, message, update_id):
         text = (message.get("text") or "").strip()
         chat = message.get("chat") or {}
-        if not text or chat.get("type") != "private":
+        if chat.get("type") != "private":
+            return
+        if not text:  # a photo, a voice note, a sticker
+            if chat.get("id") == self.chat_id:
+                self.tell("I can only read text. Please type it, for example:\n"
+                          "<i>graph theory quiz next Monday in the tutorial</i>")
             return
         if not self.chat_id:
             self.link_chat(chat["id"])
@@ -203,12 +271,12 @@ class Assistant:
         except Unreadable:
             self.tell("⚠️ I couldn't make sense of that. Could you put it another way?")
             return
-        except RuntimeError as error:  # Google Calendar refused the change
+        except CalendarProblem as error:
             print(f"{item.id}: {error}")
             self.tell("⚠️ I couldn't save that to your calendar. Please send it again later.")
             return
         print(f"{item.id}: {outcome}")
-        self.tell(text if outcome != "ignored" else f"I didn't add anything. {text}")
+        self.tell(text if outcome != "ignored" else f"I didn't change anything in your calendar. {text}")
 
     def keep_note(self, update_id, message):
         """Put a typed note aside for the next check. False if there is no room left for it."""
@@ -235,19 +303,20 @@ class Assistant:
                 outcome, text, _ = self.apply(item, manual=True)
             except AIUnavailable as error:
                 print(f"{item.id}: still waiting ({error})")
-                if not error.quota:
-                    self.alert("ai", f"{error}. Check GEMINI_API_KEY. I will keep retrying.")
+                self.ai_alert(error)
                 return
             except Unreadable:
                 outcome, text = "unreadable", "⚠️ I couldn't make sense of it. Could you put it another way?"
-            except RuntimeError as error:  # Google Calendar refused the change: try again next time
+            except CalendarProblem as error:
                 print(f"{item.id}: {error}")
-                return
+                if not self.calendar_trouble(error, f"n{note_id}"):
+                    return  # try again on the next check
+                outcome, text = "refused", "⚠️ I couldn't save it to your calendar. Please add it there yourself."
             del notes[note_id]
             print(f"{item.id}: {outcome}")
             shown = note["text"] if len(note["text"]) <= 80 else note["text"][:77] + "..."
             if outcome == "ignored":
-                text = f"I didn't add anything. {text}"
+                text = f"I didn't change anything in your calendar. {text}"
             self.tell(f"📝 Your saved note “{escape(shown)}”:\n\n{text}")
 
     def handle_button(self, query):
@@ -302,6 +371,15 @@ class Assistant:
             if 0 <= index < len(self.events):
                 target = index
 
+        # A change to something that is not in the calendar. With a date it is still worth
+        # having, so it is added. Without one there is nothing to write.
+        lost = decision.action in ("update", "note") and target is None
+        if lost and decision.action == "update" and not decision.cancelled and decision.start:
+            lost = False
+            decision = decision.model_copy(update={"action": "create"})
+        if lost and manual:
+            return "missing", NOT_FOUND, False
+
         if decision.action == "create":
             event = self.calendar.create(decision, item, posted_day)
             self.events.append(event)
@@ -333,9 +411,9 @@ class Assistant:
         outcome = self.check_canvas(budget=QUICK_CHECK_BUDGET)
         if outcome == "busy":
             self.tell("⏳ A check is already running. Its results will arrive in a moment.")
-        elif outcome == "ok":
+        elif not self.canvas_problem:
             self.tell(tg.check_text(self.last_check))
-        # "failed": the student was already told what went wrong with Canvas.
+        # Otherwise the check itself has just said what went wrong with Canvas.
 
     def handle_canvas(self, started, budget):
         client = CanvasClient(setting("CANVAS_BASE_URL"), setting("CANVAS_TOKEN"))
@@ -353,6 +431,11 @@ class Assistant:
             if item.id in have_event and short_id(item.id) not in done
         )
 
+        # Forget counts of failed tries for posts and notes that are gone.
+        tries, notes = self.state.get("tries", {}), self.state.get("notes", {})
+        for key in [k for k in tries if k not in in_window and k[1:] not in notes]:
+            del tries[key]
+
         items = [item for item in recent if short_id(item.id) not in done]
         print(f"{len(items)} new Canvas item(s).")
         # What /check reports back: how many posts were new, what became of them, how many wait.
@@ -366,9 +449,21 @@ class Assistant:
             except AIUnavailable as error:
                 # Leave this item and the rest for the next check.
                 print(f"Stopping early: {error}.")
-                if not error.quota:
-                    self.alert("ai", f"{error}. Check GEMINI_API_KEY. I will keep retrying.")
+                self.ai_alert(error)
                 return
+            except CalendarProblem as error:
+                # Posts are handled oldest first because a newer one may change an older
+                # one. So this one is not skipped: the rest waits with it for the next check.
+                print(f"Stopping early: {error}")
+                if not self.calendar_trouble(error, short_id(item.id)):
+                    return
+                # Google rejected this one post check after check. It must not hold up
+                # every later post for good, so it goes to the student.
+                outcome, worth_sending = "refused", True
+                text = (
+                    f"⚠️ I couldn't save this Canvas post to your calendar: <b>{escape(item.title)}</b>. "
+                    f'Please read it yourself.\n<a href="{escape(item.url)}">Open in Canvas</a>'
+                )
             except Unreadable:
                 # Retrying would fail the same way, so hand it to the student instead.
                 outcome, worth_sending = "unreadable", True
@@ -386,19 +481,25 @@ class Assistant:
     # --- scheduled and requested messages ---
 
     def token_reminder(self):
-        created = setting("CANVAS_TOKEN_CREATED")
-        if not created:
-            # No date given: count from the day this token was first used here.
-            mark = hashlib.sha256(setting("CANVAS_TOKEN").encode()).hexdigest()[:10]
-            if self.state.get("token_seen", {}).get("mark") != mark:
-                self.state["token_seen"] = {"mark": mark, "day": self.today}
-            created = self.state["token_seen"]["day"]
+        given = setting("CANVAS_TOKEN_CREATED")
         try:
-            created_day = date.fromisoformat(created)
+            date.fromisoformat(given)
         except ValueError:
-            if created:
-                print("CANVAS_TOKEN_CREATED is not a date like 2026-11-11: no token reminder.")
-            return
+            if given:
+                print("CANVAS_TOKEN_CREATED is not a date like 2026-11-11: counting from first use instead.")
+            given = ""
+        # The day this token was first used here. It is the date to count from when none was
+        # given, and also when the token was replaced but the given date was left as it was:
+        # that date ("old") describes the previous token.
+        mark = hashlib.sha256(setting("CANVAS_TOKEN").encode()).hexdigest()[:10]
+        seen = self.state.get("token_seen")
+        if not seen or seen.get("mark") != mark:
+            fresh = {"mark": mark, "day": self.today}
+            if seen and given:
+                fresh["old"] = given
+            seen = self.state["token_seen"] = fresh
+        created = given if given and given != seen.get("old") else seen["day"]
+        created_day = date.fromisoformat(created)
         token = self.state.setdefault("token", {})
         if token.get("created") != created:  # a new token was saved: start over
             token.clear()
@@ -431,7 +532,7 @@ class Assistant:
 
     def morning_digest(self):
         hour = setting("DIGEST_HOUR", "7")
-        if not hour.isdigit() or self.now.hour < int(hour) or self.state.get("digest") == self.today:
+        if not hour.isdigit() or self.now.hour < min(int(hour), 23) or self.state.get("digest") == self.today:
             return
         self.state["digest"] = self.today
         text = tg.digest_text(self.events, self.now, self.tz)
@@ -457,8 +558,12 @@ class Assistant:
                 self.state.get("alerts", {}).pop("canvas", None)
             except CanvasProblem as problem:
                 print(problem)
-                self.alert("canvas", str(problem))
-                told = self.state.get("alerts", {}).get("canvas") == self.today
+                self.canvas_problem = str(problem)
+                if self._quick:  # the student asked for this check: always answer
+                    told = self.tell(f"⚠️ {escape(self.canvas_problem)}")
+                else:
+                    self.alert("canvas", self.canvas_problem)
+                    told = self.state.get("alerts", {}).get("canvas") == self.today
             self.token_reminder()
             self.morning_digest()
         finally:

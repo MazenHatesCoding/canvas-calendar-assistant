@@ -62,10 +62,15 @@ class CanvasClient:
         self.session.headers["Authorization"] = f"Bearer {token}"
 
     def _request(self, url, params):
-        try:
-            response = self.session.get(url, params=params, timeout=30)
-        except requests.RequestException:
-            raise CanvasProblem("Could not reach Canvas.") from None
+        # Reading changes nothing, so a request that got no answer is tried once more
+        # before the student is told that Canvas cannot be reached.
+        for attempt in (1, 2):
+            try:
+                response = self.session.get(url, params=params, timeout=20)
+                break
+            except requests.RequestException:
+                if attempt == 2:
+                    raise CanvasProblem("Could not reach Canvas.") from None
         if response.status_code == 401:
             raise CanvasProblem(
                 "Canvas rejected the access token. It has probably expired: create a new one "

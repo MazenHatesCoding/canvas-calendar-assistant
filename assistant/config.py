@@ -23,6 +23,59 @@ def setting(name, default=""):
     return os.getenv(name, "").strip() or default
 
 
+def whole_number(name, default, lowest=0, highest=10_000):
+    """A setting that must be a number. Anything else is reported and the default is used,
+    so one mistyped value cannot stop every check."""
+    text = setting(name)
+    if not text:
+        return default
+    if not text.isdigit() or not lowest <= int(text) <= highest:
+        print(f"{name} must be a number from {lowest} to {highest}: using {default}.")
+        return default
+    return int(text)
+
+
+def timezone_name():
+    """The TIMEZONE setting if it names a real timezone, otherwise Africa/Cairo."""
+    from zoneinfo import ZoneInfo
+
+    name = setting("TIMEZONE", "Africa/Cairo")
+    try:
+        ZoneInfo(name)
+    except (KeyError, ValueError, OSError):
+        print("TIMEZONE is not a timezone name like Europe/London: using Africa/Cairo.")
+        return "Africa/Cairo"
+    return name
+
+
+def problems():
+    """Optional settings that are filled in wrongly, as sentences for the setup page."""
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    found = []
+    try:
+        ZoneInfo(setting("TIMEZONE", "Africa/Cairo"))
+    except (KeyError, ValueError, OSError):
+        found.append("TIMEZONE is not a timezone name like Europe/London.")
+    days = setting("LOOKBACK_DAYS")
+    if days and not (days.isdigit() and 1 <= int(days) <= 120):
+        found.append("LOOKBACK_DAYS must be a number from 1 to 120.")
+    hour = setting("DIGEST_HOUR")
+    if hour and hour.lower() != "off" and not (hour.isdigit() and int(hour) <= 23):
+        found.append('DIGEST_HOUR must be an hour from 0 to 23, or "off".')
+    chat = setting("TELEGRAM_CHAT_ID")
+    if chat and not chat.lstrip("-").isdigit():
+        found.append("TELEGRAM_CHAT_ID must be a number.")
+    created = setting("CANVAS_TOKEN_CREATED")
+    if created:
+        try:
+            date.fromisoformat(created)
+        except ValueError:
+            found.append("CANVAS_TOKEN_CREATED must be a date like 2026-11-11.")
+    return found
+
+
 def timetable():
     """The student's own description of their group and weekly sessions, in plain sentences."""
     text = setting("TIMETABLE")

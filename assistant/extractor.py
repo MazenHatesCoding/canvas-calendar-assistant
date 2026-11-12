@@ -13,9 +13,10 @@ from pydantic import BaseModel, ValidationError
 class AIUnavailable(Exception):
     """The AI service cannot answer right now. Worth retrying on a later run."""
 
-    def __init__(self, message, quota=False):
+    def __init__(self, message, quota=False, code=None):
         super().__init__(message)
         self.quota = quota  # True when the free daily quota is simply used up
+        self.code = code  # the service's error number, if it gave one
 
 
 class Unreadable(Exception):
@@ -48,12 +49,13 @@ The student only wants things they must DO or ATTEND in the future:
 - schedule changes that affect the student's own sessions (moved, cancelled or online classes)
 
 Choose one action:
-- "create": a new thing to do or attend that is not in the existing events list.
+- "create": a new thing to do or attend that is not in the existing events list. A quiz, exam or task held during one of the student's regular sessions is new as well: the timetable only says when that session is, and its sessions are not events.
 - "update": the item changes an existing event (new date, new time, cancellation). Set \
 target_key to that event's key and give the full new start/end. If the event is cancelled, set \
 cancelled=true instead: it will be removed from the calendar.
 - "note": the item only adds useful details to an existing event (exam scope, question format, \
 what to bring). Set target_key and put the details in notes. If no existing event matches, use "ignore".
+- For "update" and "note", target_key must be one of the keys in the existing events list. Never use them for something that is not in that list.
 - "notify": the student should be told, but nothing belongs in the calendar. Use this when one \
 of the student's regular classes is cancelled or postponed with no new date. Put a one-line \
 message for the student in notes.
@@ -218,23 +220,23 @@ class Extractor:
             if stalled and timeout >= self.call_timeout and model not in self.stalled:
                 self.stalled.append(model)
 
-            if (daily_quota or stalled or code == 404) and not last:
-                # Used up for today, gone, or not answering: move on.
-                if stalled and self.give_up_after:
-                    # Someone is waiting, and the next model may hang as well. Go straight
-                    # to the last one, which has time kept for it.
+            # Worth another try later: a per-minute limit, a busy model, or no answer.
+            temporary = code in (429, 500, 503, 504, None) and not daily_quota
+            if (daily_quota or temporary or code == 404) and not last:
+                # Used up for today, gone, busy or not answering. Each model has its own
+                # quota and its own load, so the next one is tried at once: waiting here
+                # for a busy model is what made checks run out of time on 12 Nov 2026.
+                if stalled and self.give_up_after and spare() < 2 * self.call_timeout:
+                    # The next model may hang as well and there is not much time left. Go
+                    # straight to the last one, which has time kept for it.
                     skip_to_last()
                 else:
                     print(f"   ({model} unavailable, switching to {self.models[1]})")
                     self.models.pop(0)
                 waits = list(self.retry_waits)
-            elif (code in (429, 500, 503, 504, None) and waits and not daily_quota
-                  and (room is None or spare(after=waits[0]) >= MIN_TIMEOUT)):
+            elif temporary and waits and (room is None or spare(after=waits[0]) >= MIN_TIMEOUT):
+                # Only the last model is waited for: there is nothing else left to try.
                 time.sleep(waits.pop(0))
-            elif self.give_up_after and not last:
-                # Busy and out of patience, but someone is waiting: the last model may still answer.
-                skip_to_last()
-                waits = list(self.retry_waits)
             else:
                 problem = f"AI service error {code}" if code else "AI service not answering"
-                raise AIUnavailable(problem, quota=daily_quota) from None
+                raise AIUnavailable(problem, quota=daily_quota, code=code) from None

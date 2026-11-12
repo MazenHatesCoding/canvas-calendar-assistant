@@ -4,6 +4,7 @@ Tests every setting against the real service, and tells Telegram to send the bot
 messages to this copy. Needs the CRON_SECRET setting, so only the owner can run it.
 """
 
+import os
 import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -64,10 +65,15 @@ def check_google():
     from assistant.gcal import Calendar
 
     try:
-        Calendar(config.calendar_id(), setting("TIMEZONE", "Africa/Cairo")).load_state()
+        Calendar(config.calendar_id(), config.timezone_name()).load_state()
     except Exception:
         return False, "Google refused the saved sign-in. Sign in again and replace GOOGLE_TOKEN_JSON."
     return True, "Calendar reachable."
+
+
+def check_optional():
+    found = config.problems()
+    return (False, " ".join(found)) if found else (True, "Nothing to fix.")
 
 
 def check_telegram(address):
@@ -89,7 +95,11 @@ class handler(BaseHTTPRequestHandler):
             return reply_json(self, 500, {"error": "CRON_SECRET is not set in this project."})
         if not same_secret(bearer(self), setting("CRON_SECRET")):
             return reply_json(self, 401, {"error": "That is not this project's CRON_SECRET."})
-        address = (self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "").split(",")[0].strip()
+        # The project's lasting address, not the address of this one deployment: Telegram
+        # must keep reaching the newest version after every redeploy.
+        address = os.getenv("VERCEL_PROJECT_PRODUCTION_URL", "").strip() or (
+            self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or ""
+        ).split(",")[0].strip()
         checks = [
             ("Canvas", check_canvas),
             ("Timetable", check_timetable),
@@ -97,6 +107,8 @@ class handler(BaseHTTPRequestHandler):
             ("Google Calendar", check_google),
             ("Telegram bot", lambda: check_telegram(address)),
         ]
+        if config.problems():
+            checks.append(("Optional settings", check_optional))
         results = []
         for name, check in checks:
             try:

@@ -271,11 +271,34 @@ class ModelFallback(unittest.TestCase):
         self.assertEqual(gemini.calls[-1], ("lite", 28))
         self.assertLessEqual(clock.now, core.QUICK_AI["give_up_after"])
 
-    def test_busy_models_do_not_use_up_the_reserve(self):
-        answer, extractor, gemini, _ = self.ask({"best": "busy"}, **core.QUICK_AI)
+    def test_busy_model_is_passed_over_at_once(self):
+        answer, extractor, gemini, clock = self.ask({"best": "busy"}, **core.QUICK_AI)
         self.assertEqual(answer, IGNORE)
-        self.assertEqual([model for model, _ in gemini.calls], ["best"] * 3 + ["lite"])
+        self.assertEqual([model for model, _ in gemini.calls], ["best", "good"])
+        self.assertEqual(clock.now, 0)
         self.assertEqual((extractor.stalled, extractor.out_of_quota), ([], []))
+
+    def test_hourly_check_does_not_wait_for_busy_models(self):
+        """What went wrong on 12 Nov 2026: the two best models were busy, the check waited
+        for them until the host stopped it, and a new Canvas message was never handled."""
+        answer, extractor, gemini, clock = self.ask({"best": "busy", "good": "busy"}, **core.CHECK_AI)
+        self.assertEqual(answer, IGNORE)
+        self.assertEqual([model for model, _ in gemini.calls], ["best", "good", "fair"])
+        self.assertEqual(clock.now, 0)
+        self.assertEqual(extractor.models, ["fair", "lite"])  # not asked again during this check
+
+    def test_only_the_last_model_is_waited_for(self):
+        answer, _, gemini, clock = self.ask({m: "busy" for m in MODELS}, **core.CHECK_AI)
+        self.assertIsInstance(answer, ex.AIUnavailable)
+        self.assertEqual([model for model, _ in gemini.calls], ["best", "good", "fair"] + ["lite"] * 4)
+        self.assertLessEqual(clock.now, core.CHECK_AI["give_up_after"])
+
+    def test_hourly_check_stays_inside_the_hosts_limit(self):
+        for behaviour in ({m: "hang" for m in MODELS}, {"best": "hang", "good": "hang", "fair": "hang"}):
+            _, _, _, clock = self.ask(behaviour, **core.CHECK_AI)
+            self.assertLessEqual(clock.now, core.CHECK_AI["give_up_after"])
+        # Starting up, reading Canvas and saving at the end need their share of the 300 too.
+        self.assertLessEqual(core.CHECK_BUDGET + core.CHECK_AI["give_up_after"], 260)
 
     def test_everything_hanging_gives_up_in_time(self):
         answer, extractor, _, clock = self.ask({m: "hang" for m in MODELS}, **core.QUICK_AI)
@@ -298,9 +321,9 @@ class ModelFallback(unittest.TestCase):
         self.assertEqual(extractor.answered, {"good"})
 
     def test_hourly_check_tries_every_model_in_order(self):
-        answer, extractor, gemini, _ = self.ask({"best": "hang", "good": "hang"})
+        answer, extractor, gemini, _ = self.ask({"best": "hang", "good": "hang"}, **core.CHECK_AI)
         self.assertEqual(answer, IGNORE)
-        self.assertEqual(gemini.calls, [("best", 60), ("good", 60), ("fair", 60)])
+        self.assertEqual(gemini.calls, [("best", 30), ("good", 30), ("fair", 30)])
         self.assertEqual(extractor.stalled, ["best", "good"])
 
 
@@ -359,7 +382,8 @@ class SavedNotes(unittest.TestCase):
         a._extractor.decide.side_effect = ex.AIUnavailable("quota", quota=True)
         a.handle_notes(time.monotonic(), 150)
         self.assertEqual(set(a.state["notes"]), {"77", "78"})
-        self.assertEqual(a.sent, [])
+        self.assertEqual(len(a.sent), 1)  # told once that the allowance is used up
+        self.assertIn("allowance", a.sent[0])
         self.assertEqual(a._extractor.decide.call_count, 1)
 
     def test_note_already_in_the_calendar_is_not_added_twice(self):

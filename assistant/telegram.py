@@ -8,7 +8,8 @@ import requests
 
 from .gcal import private, title_of
 
-NOTE_LIMIT = 700  # Telegram rejects messages over 4096 characters
+NOTE_LIMIT = 700  # keeps one event's message far below Telegram's limit
+MESSAGE_LIMIT = 4000  # Telegram rejects messages over 4096 characters
 DEADLINE_KINDS = ("assignment", "project")
 WEEK_REQUEST = re.compile(r"^\W*(week|wrap\s*-?\s*up|digest|next\s+(7|seven)\s+days|7\s+days)\W*$", re.I)
 
@@ -60,17 +61,20 @@ class Telegram:
         return self._call("getWebhookInfo")
 
     def send(self, chat_id, text, buttons=None):
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-        if buttons:
-            payload["reply_markup"] = {
-                "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in buttons]]
+        """Send `text`, as several messages if it is too long for one. Buttons go on the last."""
+        parts = split_message(text)
+        for number, part in enumerate(parts, 1):
+            payload = {
+                "chat_id": chat_id,
+                "text": part,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
             }
-        return self._call("sendMessage", **payload)
+            if buttons and number == len(parts):
+                payload["reply_markup"] = {
+                    "inline_keyboard": [[{"text": label, "callback_data": data} for label, data in buttons]]
+                }
+            self._call("sendMessage", **payload)
 
     def set_commands(self):
         self._call("setMyCommands", commands=COMMANDS)
@@ -80,6 +84,27 @@ class Telegram:
 
     def clear_buttons(self, chat_id, message_id):
         self._call("editMessageReplyMarkup", chat_id=chat_id, message_id=message_id)
+
+
+def split_message(text, limit=MESSAGE_LIMIT):
+    """`text` in pieces Telegram accepts, cut between lines. Every line the assistant writes
+    opens and closes its own formatting, so a piece never ends in the middle of bold text."""
+    parts, current = [], ""
+    for line in text.split("\n"):
+        while len(line) > limit:  # one enormous line: cut it anyway
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        if current and len(current) + 1 + len(line) > limit:
+            parts.append(current)
+            current = line
+        else:
+            current = f"{current}\n{line}" if current else line
+    if current.strip():
+        parts.append(current)
+    return parts or [text]
 
 
 def wants_week(text):
